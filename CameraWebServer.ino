@@ -1,14 +1,20 @@
 #include <WiFi.h>
+#include <ArduinoWebsockets.h>
 #include "esp_camera.h"
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
+
+using namespace websockets;
 
 // Replace with your network credentials
 const char* ssid = "ESP32-Access-Point";
 const char* password = "123456789";
 
-// Set web server port number to 80
-WiFiServer server(80);
+// WebSocket server
+WebsocketsServer wsServer;
+
+// HTTP server for the camera
+WiFiServer httpServer(80);
 
 // Variable to store the HTTP request
 String header;
@@ -47,38 +53,7 @@ void setupCamera() {
   }
 }
 
-void findRedDotCoordinates(camera_fb_t* fb, int& x, int& y) {
-  // Initialize coordinates
-  x = -1;
-  y = -1;
-
-  int maxRedIntensity = 0; // To track the brightest red spot
-  uint8_t* data = fb->buf; // Pointer to frame buffer data
-  int width = fb->width;
-  int height = fb->height;
-
-  for (int i = 0; i < width * height * 2; i += 2) { // Iterate through each pixel (RGB565 format)
-    uint8_t highByte = data[i];
-    uint8_t lowByte = data[i + 1];
-
-    // Extract RGB components
-    uint8_t red = (highByte & 0xF8);         // 5 bits for red
-    uint8_t green = ((highByte & 0x07) << 3) | ((lowByte & 0xE0) >> 5); // 6 bits for green
-    uint8_t blue = (lowByte & 0x1F) << 3;    // 5 bits for blue
-
-    // Check if the red intensity is high and higher than green and blue
-    if (red > 100 && red > green * 1.5 && red > blue * 1.5) {
-      int intensity = red - (green + blue); // Calculate the "redness"
-      if (intensity > maxRedIntensity) {
-        maxRedIntensity = intensity;
-        int pixelIndex = i / 2;
-        x = pixelIndex % width;
-        y = pixelIndex / width;
-      }
-    }
-  }
-}
-
+// Handle the camera stream
 void handleCameraStream(WiFiClient& client) {
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
@@ -91,33 +66,31 @@ void handleCameraStream(WiFiClient& client) {
       continue;
     }
 
-    int redX, redY;
-    findRedDotCoordinates(fb, redX, redY);
-
-    // Display the coordinates of the red dot on the web page
-    String coordinates = "No red laser dot detected";
-    if (redX != -1 && redY != -1) {
-      coordinates = "Red laser dot detected at: (" + String(redX) + ", " + String(redY) + ")";
-      Serial.println(coordinates);
-    } else {
-      Serial.println(coordinates);
-    }
-
-    // Send the coordinates to the client
+    // Send the camera feed to the client
     client.printf("--frame\r\n");
     client.printf("Content-Type: image/jpeg\r\n\r\n");
     client.write(fb->buf, fb->len);
     client.printf("\r\n");
 
-    // Send coordinates as text (just below the camera feed)
-    client.println("<br>");
-    client.println("<h3>" + coordinates + "</h3>");
-    client.println("<br>");
-
     esp_camera_fb_return(fb);
 
     // Break the loop if the client disconnects
     if (!client.connected()) break;
+  }
+}
+
+// Handle WebSocket client messages
+void handleWebSocketMessage(WebsocketsClient& client, const WebsocketsMessage& message) {
+  String receivedMessage = message.data();
+  Serial.println("Received from client: " + receivedMessage);
+
+  // Example: Respond to specific commands
+  if (receivedMessage == "ping") {
+    client.send("pong");
+  } else if (receivedMessage == "status") {
+    client.send("ESP32 is running and ready.");
+  } else {
+    client.send("Unknown command: " + receivedMessage);
   }
 }
 
@@ -132,28 +105,32 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
 
-  // Start the web server
-  server.begin();
+  // Start the HTTP server
+  httpServer.begin();
 
   // Initialize the camera
   setupCamera();
+
+  // Start the WebSocket server
+  wsServer.listen(81);
+  Serial.println("WebSocket server started on port 81");
 }
 
 void loop() {
-  WiFiClient client = server.available(); // Listen for incoming clients
-
-  if (client) { // If a new client connects
-    Serial.println("New Client.");
+  // Handle HTTP requests for the camera feed
+  WiFiClient client = httpServer.available();
+  if (client) {
+    Serial.println("New HTTP client.");
     String currentLine = ""; // Make a String to hold incoming data from the client
-    while (client.connected()) { // Loop while the client's connected
-      if (client.available()) { // If there's bytes to read from the client
-        char c = client.read(); // Read a byte
+    while (client.connected()) {
+      if (client.available()) {
+        char c = client.read();
         Serial.write(c); // Print it to the serial monitor
         header += c;
 
         if (c == '\n') { // If the byte is a newline character
           if (currentLine.length() == 0) {
-            // Handle `/stream` endpoint for camera feed
+            // Handle `/stream` endpoint for the camera feed
             if (header.indexOf("GET /stream") >= 0) {
               handleCameraStream(client);
               break;
@@ -173,6 +150,7 @@ void loop() {
             client.println("</head>");
             client.println("<body><h1>ESP32 Web Server</h1>");
             client.println("<p><a href=\"/stream\"><button class=\"button\">Stream Camera</button></a></p>");
+            client.println("<p>WebSocket server is running on port 81.</p>");
             client.println("</body></html>");
             client.println();
             break;
@@ -187,5 +165,15 @@ void loop() {
     header = "";
     client.stop();
     Serial.println("Client disconnected.");
+  }
+
+  // Handle WebSocket connections
+  WebsocketsClient wsClient = wsServer.accept();
+  if (wsClient.available()) {
+    Serial.println("New WebSocket client connected.");
+    wsClient.onMessage([&](WebsocketsMessage message) {
+      handleWebSocketMessage(wsClient, message);
+    });
+    wsClient.poll();
   }
 }
