@@ -1,20 +1,14 @@
 #include <WiFi.h>
-#include <ArduinoWebsockets.h>
 #include "esp_camera.h"
 #define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
-
-using namespace websockets;
 
 // Replace with your network credentials
 const char* ssid = "ESP32-Access-Point";
 const char* password = "123456789";
 
-// WebSocket server
-WebsocketsServer wsServer;
-
-// HTTP server for the camera
-WiFiServer httpServer(80);
+// Set web server port number to 80
+WiFiServer server(80);
 
 // Variable to store the HTTP request
 String header;
@@ -53,7 +47,6 @@ void setupCamera() {
   }
 }
 
-// Handle the camera stream
 void handleCameraStream(WiFiClient& client) {
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
@@ -79,21 +72,6 @@ void handleCameraStream(WiFiClient& client) {
   }
 }
 
-// Handle WebSocket client messages
-void handleWebSocketMessage(WebsocketsClient& client, const WebsocketsMessage& message) {
-  String receivedMessage = message.data();
-  Serial.println("Received from client: " + receivedMessage);
-
-  // Example: Respond to specific commands
-  if (receivedMessage == "ping") {
-    client.send("pong");
-  } else if (receivedMessage == "status") {
-    client.send("ESP32 is running and ready.");
-  } else {
-    client.send("Unknown command: " + receivedMessage);
-  }
-}
-
 void setup() {
   Serial.begin(115200);
 
@@ -105,32 +83,28 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
 
-  // Start the HTTP server
-  httpServer.begin();
+  // Start the web server
+  server.begin();
 
   // Initialize the camera
   setupCamera();
-
-  // Start the WebSocket server
-  wsServer.listen(81);
-  Serial.println("WebSocket server started on port 81");
 }
 
 void loop() {
-  // Handle HTTP requests for the camera feed
-  WiFiClient client = httpServer.available();
-  if (client) {
-    Serial.println("New HTTP client.");
+  WiFiClient client = server.available(); // Listen for incoming clients
+
+  if (client) { // If a new client connects
+    Serial.println("New Client.");
     String currentLine = ""; // Make a String to hold incoming data from the client
-    while (client.connected()) {
-      if (client.available()) {
-        char c = client.read();
+    while (client.connected()) { // Loop while the client's connected
+      if (client.available()) { // If there's bytes to read from the client
+        char c = client.read(); // Read a byte
         Serial.write(c); // Print it to the serial monitor
         header += c;
 
         if (c == '\n') { // If the byte is a newline character
           if (currentLine.length() == 0) {
-            // Handle `/stream` endpoint for the camera feed
+            // Handle /stream endpoint for camera feed
             if (header.indexOf("GET /stream") >= 0) {
               handleCameraStream(client);
               break;
@@ -150,7 +124,6 @@ void loop() {
             client.println("</head>");
             client.println("<body><h1>ESP32 Web Server</h1>");
             client.println("<p><a href=\"/stream\"><button class=\"button\">Stream Camera</button></a></p>");
-            client.println("<p>WebSocket server is running on port 81.</p>");
             client.println("</body></html>");
             client.println();
             break;
@@ -165,15 +138,5 @@ void loop() {
     header = "";
     client.stop();
     Serial.println("Client disconnected.");
-  }
-
-  // Handle WebSocket connections
-  WebsocketsClient wsClient = wsServer.accept();
-  if (wsClient.available()) {
-    Serial.println("New WebSocket client connected.");
-    wsClient.onMessage([&](WebsocketsMessage message) {
-      handleWebSocketMessage(wsClient, message);
-    });
-    wsClient.poll();
   }
 }
